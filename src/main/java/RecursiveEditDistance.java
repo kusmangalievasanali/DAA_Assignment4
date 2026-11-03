@@ -8,6 +8,10 @@ public class RecursiveEditDistance implements EditDistance {
     }
 
 
+    // State: solve(i, j) is the edit distance between the first i and j characters.
+    // Transition: If characters match, solve(i-1, j-1); otherwise, 1 + min(delete, insert, replace).
+    // Base case: If i == 0, return j; if j == 0, return i.
+
     @Override
     public int distance(String a, String b) {
         operations = 0;

@@ -7,6 +7,10 @@ public class TableEditDistance implements EditDistance {
         return operations;
     }
 
+    // State: dp[i][j] is the edit distance between the first i characters of a and the first j characters of b.
+    // Transition: If characters match, dp[i][j] = dp[i-1][j-1]; otherwise, 1 + min(delete, insert, replace).
+    // Base case: dp[i][0] = i and dp[0][j] = j.
+
     @Override
     public int distance(String a, String b) {
         operations = 0;

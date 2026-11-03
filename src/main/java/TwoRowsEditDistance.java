@@ -7,6 +7,10 @@ public class TwoRowsEditDistance implements EditDistance {
         return operations;
     }
 
+    // State: previous[j] and current[j] store edit distances for the previous and current rows.
+    // Transition: If characters match, use previous[j-1]; otherwise, 1 + min(delete, insert, replace).
+    // Base case: previous[j] = j and current[0] = i.
+
     @Override
     public int distance(String a, String b) {
         operations = 0;
