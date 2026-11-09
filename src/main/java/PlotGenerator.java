@@ -1,207 +1,297 @@
+import org.knowm.xchart.*;
+import org.knowm.xchart.style.Styler;
+import org.knowm.xchart.style.lines.SeriesLines;
+import org.knowm.xchart.style.markers.Marker;
+import org.knowm.xchart.style.markers.SeriesMarkers;
 
+import javax.imageio.ImageIO;
+import java.awt.*;
+import java.awt.image.BufferedImage;
+import java.io.File;
 import java.io.IOException;
-import java.nio.file.Files;
-import java.nio.file.Path;
-import java.util.ArrayList;
-import java.util.Collections;
+import java.nio.file.*;
 import java.util.List;
-import java.util.Locale;
-import java.util.Map;
-import java.util.TreeMap;
+import java.util.*;
+import java.util.function.DoubleUnaryOperator;
+import java.util.function.ToDoubleFunction;
+import java.util.stream.Collectors;
 
+/**
+ * Generates the 7 plots from results/results.csv.
+ * CSV columns (by position): algorithm,input,n,time_ms,counter,run
+ * Header line (if any) is skipped automatically.
+ */
 public class PlotGenerator {
 
-    private record Point(int n, double value) {}
+    record Row(String algo, String input, int n, double timeMs, long counter) {}
+
+    static final Path CSV = Paths.get("results/results.csv");
+    static final Path OUT = Paths.get("results/plots");
+
+    static final Marker[] MARKERS = {
+            SeriesMarkers.CIRCLE, SeriesMarkers.DIAMOND, SeriesMarkers.SQUARE, SeriesMarkers.TRIANGLE_UP
+    };
 
     public static void main(String[] args) throws IOException {
-        List<String> lines = Files.readAllLines(
-                Path.of("results", "results.csv")
-        );
+        List<Row> rows = readCsv();
+        Files.createDirectories(OUT);
 
-        Path folder = Path.of("results", "plots");
-        Files.createDirectories(folder);
+        recursionCalls(rows);
+        dpOperations(rows);
+        dpMemory(rows);
+        searchComparisons(rows);
+        searchRatio(rows);
+        dpTime(rows);
+        searchTime(rows);
 
-        plot(lines, folder.resolve("edit_distance.svg"),
-                "Edit Distance - Median Time",
-                "random", "time",
-                new String[]{"TableDP", "TwoRowsDP"});
-
-        plot(lines, folder.resolve("search_time.svg"),
-                "String Search - Adversarial Time",
-                "adversarial", "time",
-                new String[]{"NaiveSearch", "KMP"});
-
-        plot(lines, folder.resolve("search_comparisons.svg"),
-                "String Search - Comparisons",
-                "adversarial", "operations",
-                new String[]{"NaiveSearch", "KMP"});
-
-        System.out.println("Three plots saved to results/plots");
+        System.out.println("Done. Plots saved to " + OUT.toAbsolutePath());
     }
 
-    private static void plot(
-            List<String> lines,
-            Path output,
-            String title,
-            String input,
-            String metric,
-            String[] algorithms
-    ) throws IOException {
+    // ---------------------------------------------------------------- 1
+    static void recursionCalls(List<Row> rows) throws IOException {
+        XYChart logLog = chart("log-log", "n (string length, characters)",
+                "recursive calls (count)", true, true, 700, 520);
+        XYChart logY = chart("log Y, linear X", "n (string length, characters)",
+                "recursive calls (count)", false, true, 700, 520);
+        logLog.getStyler().setLegendPosition(Styler.LegendPosition.InsideNW);
+        logY.getStyler().setLegendPosition(Styler.LegendPosition.InsideNW);
 
-        int width = 900;
-        int height = 550;
-        int left = 100;
-        int right = 50;
-        int top = 75;
-        int bottom = 90;
+        String[] inputs = {"random", "different"};
+        for (int i = 0; i < inputs.length; i++) {
+            var data = agg(rows, "Recursive", inputs[i], r -> r.counter);
+            addData(logLog, "Recursive - " + inputs[i], data, MARKERS[i], i);
+            addData(logY, "Recursive - " + inputs[i], data, MARKERS[i], i);
+        }
+        save("recursion_calls.png",
+                "Takeaway: recursive calls grow exponentially (a straight line on log Y); "
+                        + "strings with no common characters cost about 28x more calls than random ones at n = 10.",
+                logLog, logY);
+    }
 
-        String[] colors = {"#2563eb", "#dc2626"};
+    // ---------------------------------------------------------------- 2
+    static void dpOperations(List<Row> rows) throws IOException {
+        XYChart c = chart("DP work: cell updates vs n", "n (length of both strings, characters)",
+                "cell updates (count)", true, true, 1000, 600);
+        var table = agg(rows, "TableDP", "random", r -> r.counter);
+        var two = agg(rows, "TwoRowsDP", "random", r -> r.counter);
+        addData(c, "TableDP (measured)", table, MARKERS[2], 0);
+        addData(c, "TwoRowsDP (measured)", two, MARKERS[3], 1);
+        addRef(c, "reference n", table.keySet(), n -> n);
+        addRef(c, "reference n^2", table.keySet(), n -> n * n);
+        save("dp_operations.png",
+                "Takeaway: both DP versions do exactly n^2 cell updates (the two lines coincide) "
+                        + "and follow the n^2 reference, not n.", c);
+    }
 
-        List<List<Point>> series = new ArrayList<>();
-        double maxX = 0;
-        double maxY = 0;
+    // ---------------------------------------------------------------- 3
+    static void dpMemory(List<Row> rows) throws IOException {
+        XYChart c = chart("DP memory: full table vs two rows (modelled)",
+                "n (length of both strings, characters)", "memory for DP cells (KiB, int = 4 bytes)",
+                true, true, 1000, 600);
+        var ns = agg(rows, "TableDP", "random", r -> r.counter).keySet();
+        TreeMap<Integer, Double> table = new TreeMap<>(), two = new TreeMap<>();
+        for (int n : ns) {
+            table.put(n, (n + 1.0) * (n + 1.0) * 4 / 1024.0);
+            two.put(n, 2.0 * (n + 1.0) * 4 / 1024.0);
+        }
+        addData(c, "TableDP: (n+1)^2 cells", table, MARKERS[2], 0);
+        addData(c, "TwoRowsDP: 2(n+1) cells", two, MARKERS[3], 0);
+        save("dp_memory.png",
+                "Takeaway: memory is modelled from the formulas (not measured): the table grows as n^2, two rows as n; "
+                        + "at n = 1600 that is about 10 MiB against 12.5 KiB.", c);
+    }
 
-        for (String algorithm : algorithms) {
-            Map<Integer, List<Double>> values = new TreeMap<>();
+    // ---------------------------------------------------------------- 4
+    static void searchComparisons(List<Row> rows) throws IOException {
+        XYChart c = chart("String search: character comparisons vs text length",
+                "n (text length, characters)", "character comparisons (count)", true, true, 1000, 600);
+        String[][] combos = {
+                {"NaiveSearch", "random"}, {"NaiveSearch", "adversarial"},
+                {"KMP", "random"}, {"KMP", "adversarial"}};
+        Collection<Integer> ns = null;
+        for (int i = 0; i < combos.length; i++) {
+            var data = agg(rows, combos[i][0], combos[i][1], r -> r.counter);
+            ns = data.keySet();
+            addData(c, combos[i][0] + " - " + combos[i][1], data, MARKERS[i < 2 ? 0 : 1], i % 2);
+        }
+        addRef(c, "reference n", ns, n -> n);
+        addRef(c, "reference 20*n", ns, n -> 20 * n);
+        save("search_comparisons.png",
+                "Takeaway: on adversarial text Naive follows the 20*n line (pattern length about 20) while KMP stays near 2*n; "
+                        + "on random text both stay close to n.", c);
+    }
 
-            for (int i = 1; i < lines.size(); i++) {
-                String[] parts = lines.get(i).split(",");
+    // ---------------------------------------------------------------- 5
+    static void searchRatio(List<Row> rows) throws IOException {
+        XYChart c = chart("String search: comparisons per text character",
+                "n (text length, characters)", "comparisons per character (ratio)", true, true, 1000, 600);
+        String[][] combos = {
+                {"NaiveSearch", "random"}, {"NaiveSearch", "adversarial"},
+                {"KMP", "random"}, {"KMP", "adversarial"}};
+        for (int i = 0; i < combos.length; i++) {
+            var data = agg(rows, combos[i][0], combos[i][1], r -> (double) r.counter / r.n);
+            addData(c, combos[i][0] + " - " + combos[i][1], data, MARKERS[i < 2 ? 0 : 1], i % 2);
+        }
+        save("search_ratio.png",
+                "Takeaway: Naive needs about 20 comparisons per character on adversarial text, KMP never more than about 2, "
+                        + "and on random text both need about 1.2-1.3.", c);
+    }
 
-                if (!parts[0].equals(algorithm)
-                        || !parts[1].equals(input)) {
-                    continue;
-                }
+    // ---------------------------------------------------------------- 6
+    static void dpTime(List<Row> rows) throws IOException {
+        XYChart c = chart("Edit distance DP: median running time",
+                "n (length of both strings, characters)", "time (ms, median of 5 runs)", true, true, 1000, 600);
+        String[] algos = {"TableDP", "TwoRowsDP"};
+        String[] inputs = {"random", "different"};
+        for (int a = 0; a < algos.length; a++)
+            for (int i = 0; i < inputs.length; i++)
+                addData(c, algos[a] + " - " + inputs[i],
+                        agg(rows, algos[a], inputs[i], r -> r.timeMs), MARKERS[a + 2], i);
+        save("dp_time.png",
+                "Takeaway: for n >= 800 both versions take about 4x longer when n doubles (quadratic) and TwoRows is "
+                        + "faster; small-n points are distorted by JIT warm-up.", c);
+    }
 
-                int n = Integer.parseInt(parts[2]);
-                double value = Double.parseDouble(
-                        parts[metric.equals("time") ? 3 : 4]
-                );
+    // ---------------------------------------------------------------- 7
+    static void searchTime(List<Row> rows) throws IOException {
+        XYChart c = chart("String search: median running time",
+                "n (text length, characters)", "time (ms, median of 5 runs)", true, true, 1000, 600);
+        String[][] combos = {
+                {"NaiveSearch", "random"}, {"NaiveSearch", "adversarial"},
+                {"KMP", "random"}, {"KMP", "adversarial"}};
+        for (int i = 0; i < combos.length; i++)
+            addData(c, combos[i][0] + " - " + combos[i][1],
+                    agg(rows, combos[i][0], combos[i][1], r -> r.timeMs), MARKERS[i < 2 ? 0 : 1], i % 2);
+        save("search_time.png",
+                "Takeaway: on adversarial text Naive is about 9x slower than KMP at n = 64000; "
+                        + "on random text the two are close and noisy.", c);
+    }
 
-                values.computeIfAbsent(
-                        n, k -> new ArrayList<>()
-                ).add(value);
+    // =============================================================== helpers
+
+    static List<Row> readCsv() throws IOException {
+        List<Row> rows = new ArrayList<>();
+        for (String line : Files.readAllLines(CSV)) {
+            String[] p = line.trim().split(",");
+            if (p.length < 5) continue;
+            try {
+                rows.add(new Row(p[0].trim(), p[1].trim(), Integer.parseInt(p[2].trim()),
+                        Double.parseDouble(p[3].trim()), Long.parseLong(p[4].trim())));
+            } catch (NumberFormatException e) {
+                // header line or malformed row: skip
             }
+        }
+        if (rows.isEmpty()) throw new IllegalStateException("No data rows in " + CSV.toAbsolutePath());
+        return rows;
+    }
 
-            List<Point> points = new ArrayList<>();
+    /** n -> median of value over all runs for (algo, input). */
+    static TreeMap<Integer, Double> agg(List<Row> rows, String algo, String input, ToDoubleFunction<Row> f) {
+        Map<Integer, List<Double>> byN = rows.stream()
+                .filter(r -> r.algo.equals(algo) && r.input.equals(input))
+                .collect(Collectors.groupingBy(r -> r.n,
+                        Collectors.mapping(f::applyAsDouble, Collectors.toList())));
+        TreeMap<Integer, Double> out = new TreeMap<>();
+        byN.forEach((n, vals) -> out.put(n, median(vals)));
+        if (out.isEmpty()) System.err.println("WARNING: no rows for " + algo + " / " + input);
+        return out;
+    }
 
-            for (Map.Entry<Integer, List<Double>> entry
-                    : values.entrySet()) {
+    static double median(List<Double> v) {
+        List<Double> s = new ArrayList<>(v);
+        Collections.sort(s);
+        int k = s.size();
+        return k % 2 == 1 ? s.get(k / 2) : (s.get(k / 2 - 1) + s.get(k / 2)) / 2.0;
+    }
 
-                List<Double> samples = entry.getValue();
-                Collections.sort(samples);
+    static XYChart chart(String title, String xTitle, String yTitle,
+                         boolean logX, boolean logY, int w, int h) {
+        XYChart c = new XYChartBuilder().width(w).height(h)
+                .title(title).xAxisTitle(xTitle).yAxisTitle(yTitle).build();
+        var s = c.getStyler();
+        s.setXAxisLogarithmic(logX);
+        s.setYAxisLogarithmic(logY);
+        s.setDefaultSeriesRenderStyle(XYSeries.XYSeriesRenderStyle.Line);
+        s.setMarkerSize(8);
+        s.setLegendPosition(Styler.LegendPosition.OutsideE);
+        s.setChartTitleFont(new Font("SansSerif", Font.BOLD, 16));
+        return c;
+    }
 
-                double median = samples.get(samples.size() / 2);
-                points.add(new Point(entry.getKey(), median));
+    /** styleIdx 0 = solid line, otherwise dash-dot (to tell the second input apart). */
+    static void addData(XYChart c, String name, TreeMap<Integer, Double> data, Marker marker, int styleIdx) {
+        double[] x = data.keySet().stream().mapToDouble(Integer::doubleValue).toArray();
+        double[] y = data.values().stream().mapToDouble(Double::doubleValue).toArray();
+        XYSeries s = c.addSeries(name, x, y);
+        s.setMarker(marker);
+        s.setLineStyle(styleIdx == 0 ? SeriesLines.SOLID : SeriesLines.DASH_DOT);
+    }
 
-                maxX = Math.max(maxX, entry.getKey());
-                maxY = Math.max(maxY, median);
-            }
+    static void addRef(XYChart c, String name, Collection<Integer> ns, DoubleUnaryOperator f) {
+        double[] x = ns.stream().mapToDouble(Integer::doubleValue).toArray();
+        double[] y = Arrays.stream(x).map(f).toArray();
+        XYSeries s = c.addSeries(name, x, y);
+        s.setMarker(SeriesMarkers.NONE);
+        s.setLineStyle(SeriesLines.DASH_DASH);
+        s.setLineColor(Color.GRAY);
+    }
 
-            series.add(points);
+    /** Puts one or more charts side by side and writes the caption under them. */
+    static void save(String fileName, String caption, XYChart... charts) throws IOException {
+        List<BufferedImage> imgs = new ArrayList<>();
+        int w = 0, h = 0;
+        for (XYChart c : charts) {
+            BufferedImage im = BitmapEncoder.getBufferedImage(c);
+            imgs.add(im);
+            w += im.getWidth();
+            h = Math.max(h, im.getHeight());
         }
 
-        maxY = Math.max(maxY * 1.1, 0.000001);
+        Font font = new Font("SansSerif", Font.ITALIC, 15);
+        Graphics2D scratch = new BufferedImage(1, 1, BufferedImage.TYPE_INT_RGB).createGraphics();
+        FontMetrics fm = scratch.getFontMetrics(font);
+        List<String> lines = wrap(caption, fm, w - 40);
+        scratch.dispose();
 
-        StringBuilder svg = new StringBuilder();
+        int lineH = fm.getHeight() + 2;
+        int capH = lines.size() * lineH + 24;
 
-        svg.append(String.format(
-                Locale.US,
-                "<svg xmlns=\"http://www.w3.org/2000/svg\" " +
-                        "width=\"%d\" height=\"%d\">",
-                width, height
-        ));
-
-        svg.append("<rect width=\"100%\" height=\"100%\" fill=\"white\"/>");
-
-        svg.append(String.format(
-                "<text x=\"450\" y=\"35\" text-anchor=\"middle\" " +
-                        "font-size=\"23\" font-family=\"Arial\">%s</text>",
-                title
-        ));
-
-        svg.append(String.format(
-                "<path d=\"M%d %d V%d H%d\" " +
-                        "fill=\"none\" stroke=\"black\" stroke-width=\"2\"/>",
-                left, top, height - bottom, width - right
-        ));
-
-        for (int tick = 0; tick <= 5; tick++) {
-            double value = maxY * tick / 5.0;
-            double y = height - bottom
-                    - (height - top - bottom) * tick / 5.0;
-
-            svg.append(String.format(
-                    Locale.US,
-                    "<text x=\"%d\" y=\"%.1f\" text-anchor=\"end\" " +
-                            "font-size=\"13\" font-family=\"Arial\">%.3f</text>",
-                    left - 12, y + 5, value
-            ));
+        BufferedImage out = new BufferedImage(w, h + capH, BufferedImage.TYPE_INT_RGB);
+        Graphics2D g = out.createGraphics();
+        g.setColor(Color.WHITE);
+        g.fillRect(0, 0, w, h + capH);
+        int x = 0;
+        for (BufferedImage im : imgs) {
+            g.drawImage(im, x, 0, null);
+            x += im.getWidth();
         }
+        g.setColor(Color.BLACK);
+        g.setFont(font);
+        g.setRenderingHint(RenderingHints.KEY_TEXT_ANTIALIASING, RenderingHints.VALUE_TEXT_ANTIALIAS_ON);
+        int y = h + 16 + fm.getAscent();
+        for (String ln : lines) {
+            g.drawString(ln, 20, y);
+            y += lineH;
+        }
+        g.dispose();
 
-        for (int s = 0; s < series.size(); s++) {
-            StringBuilder path = new StringBuilder();
+        ImageIO.write(out, "png", OUT.resolve(fileName).toFile());
+        System.out.println("saved " + fileName);
+    }
 
-            for (int i = 0; i < series.get(s).size(); i++) {
-                Point p = series.get(s).get(i);
-
-                double x = left
-                        + p.n / maxX * (width - left - right);
-
-                double y = height - bottom
-                        - p.value / maxY * (height - top - bottom);
-
-                path.append(String.format(
-                        Locale.US,
-                        "%s %.2f %.2f ",
-                        i == 0 ? "M" : "L", x, y
-                ));
-
-                svg.append(String.format(
-                        Locale.US,
-                        "<circle cx=\"%.2f\" cy=\"%.2f\" r=\"5\" fill=\"%s\"/>",
-                        x, y, colors[s]
-                ));
-
-                svg.append(String.format(
-                        Locale.US,
-                        "<text x=\"%.2f\" y=\"%d\" text-anchor=\"middle\" " +
-                                "font-size=\"12\" font-family=\"Arial\">%d</text>",
-                        x, height - bottom + 23, p.n
-                ));
+    static List<String> wrap(String text, FontMetrics fm, int maxWidth) {
+        List<String> lines = new ArrayList<>();
+        StringBuilder cur = new StringBuilder();
+        for (String word : text.split(" ")) {
+            String trial = cur.length() == 0 ? word : cur + " " + word;
+            if (fm.stringWidth(trial) > maxWidth && cur.length() > 0) {
+                lines.add(cur.toString());
+                cur = new StringBuilder(word);
+            } else {
+                cur = new StringBuilder(trial);
             }
-
-            svg.append(String.format(
-                    "<path d=\"%s\" fill=\"none\" stroke=\"%s\" " +
-                            "stroke-width=\"3\"/>",
-                    path, colors[s]
-            ));
-
-            svg.append(String.format(
-                    "<text x=\"%d\" y=\"%d\" font-size=\"15\" " +
-                            "font-family=\"Arial\" fill=\"%s\">%s</text>",
-                    130 + s * 250, height - 25,
-                    colors[s], algorithms[s]
-            ));
         }
-
-        String yLabel = metric.equals("time")
-                ? "Time (ms)"
-                : "Character comparisons";
-
-        svg.append(String.format(
-                "<text x=\"450\" y=\"530\" text-anchor=\"middle\" " +
-                        "font-size=\"15\" font-family=\"Arial\">Input size (n)</text>"
-        ));
-
-        svg.append(String.format(
-                "<text x=\"25\" y=\"280\" text-anchor=\"middle\" " +
-                        "transform=\"rotate(-90 25 280)\" " +
-                        "font-size=\"15\" font-family=\"Arial\">%s</text>",
-                yLabel
-        ));
-
-        svg.append("</svg>");
-
-        Files.writeString(output, svg.toString());
+        if (cur.length() > 0) lines.add(cur.toString());
+        return lines;
     }
 }
